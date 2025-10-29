@@ -7,10 +7,19 @@ from pathlib import Path
 from typing import Dict
 
 import torch
+from torch.serialization import add_safe_globals
 
 from otpnet import OTPNet
 from otpnet.data import create_dataloader
 from otpnet.metrics import psnr, sam
+
+try:
+    from pathlib import WindowsPath
+except ImportError:  # pragma: no cover
+    WindowsPath = None
+
+if WindowsPath is not None:
+    add_safe_globals({WindowsPath})
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--scale", type=float, default=1.0)
+    parser.add_argument("--scale", type=float, default=2047.0)
     parser.add_argument("--upsample-mode", type=str, default=None, help="Override checkpoint upsample mode.")
     parser.add_argument("--num-stages", type=int, default=None, help="Override checkpoint number of stages.")
     parser.add_argument("--hidden-channels", type=int, default=None, help="Override checkpoint hidden channels.")
@@ -70,8 +79,10 @@ def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.d
             pred = model(batch["pan"], batch["lr_ms"])
             loss = l1(pred, batch["hr_ms"])
             losses.append(loss.item())
-            psnr_scores.append(psnr(pred, batch["hr_ms"]).mean().item())
-            sam_scores.append(sam(pred, batch["hr_ms"]).mean().item())
+            pred_rescaled = pred * scale
+            target_rescaled = batch["hr_ms"] * scale
+            psnr_scores.append(psnr(pred_rescaled, target_rescaled, data_range=scale))
+            sam_scores.append(sam(pred_rescaled, target_rescaled))
 
     return {
         "loss": float(sum(losses) / len(losses)),

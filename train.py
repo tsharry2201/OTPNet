@@ -6,7 +6,7 @@ import argparse
 import math
 import platform
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Any
 
 import torch
 from torch import nn
@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--no-tensorboard", action="store_true")
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=10,
+        help="Save a training checkpoint every N iterations (0 to disable).",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable logging to Weights & Biases.")
     parser.add_argument(
         "--wandb-entity",
@@ -73,6 +79,16 @@ def prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device, scale: f
     for key, tensor in batch.items():
         scaled[key] = tensor.to(device) / scale
     return scaled
+
+
+def serialize_args(args: argparse.Namespace) -> Dict[str, Any]:
+    serialised: Dict[str, Any] = {}
+    for key, value in vars(args).items():
+        if isinstance(value, Path):
+            serialised[key] = str(value)
+        else:
+            serialised[key] = value
+    return serialised
 
 
 def main() -> None:
@@ -125,13 +141,25 @@ def main() -> None:
             wandb_kwargs = {
                 "project": args.wandb_project,
                 "entity": args.wandb_entity,
-                "config": vars(args),
+                "config": serialize_args(args),
             }
             if args.wandb_run_name:
                 wandb_kwargs["name"] = args.wandb_run_name
             wandb_run = wandb.init(**wandb_kwargs)
 
     best_psnr = -math.inf
+
+    def build_checkpoint_state(epoch_idx: int, iteration_idx: Optional[int] = None) -> Dict[str, object]:
+        state: Dict[str, object] = {
+            "epoch": epoch_idx,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "args": serialize_args(args),
+        }
+        if iteration_idx is not None:
+            state["iteration"] = iteration_idx
+        return state
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -153,10 +181,16 @@ def main() -> None:
                 lr = optimizer.param_groups[0]["lr"]
                 avg_loss = running_loss / args.log_interval
                 print(f"Epoch {epoch:03d} Iter {iteration:05d} | Loss {avg_loss:.4f} | LR {lr:.2e}")
+                global_step = (epoch - 1) * len(train_loader) + iteration
                 if writer:
-                    global_step = (epoch - 1) * len(train_loader) + iteration
                     writer.add_scalar("train/loss", avg_loss, global_step)
+                if wandb_run:
+                    wandb_run.log({"train/loss": avg_loss, "train/lr": lr}, step=global_step)
                 running_loss = 0.0
+
+            if args.checkpoint_interval and iteration % args.checkpoint_interval == 0:
+                iter_path = args.output_dir / f"epoch_{epoch:03d}_iter_{iteration:05d}.pth"
+                torch.save(build_checkpoint_state(epoch, iteration), iter_path)
 
         scheduler.step()
 
@@ -170,36 +204,33 @@ def main() -> None:
             writer.add_scalar("valid/loss", val_metrics["loss"], epoch)
             writer.add_scalar("valid/psnr", val_metrics["psnr"], epoch)
             writer.add_scalar("valid/sam", val_metrics["sam"], epoch)
+        if wandb_run:
+            wandb_run.log(
+                {
+                    "valid/loss": val_metrics["loss"],
+                    "valid/psnr": val_metrics["psnr"],
+                    "valid/sam": val_metrics["sam"],
+                    "train/lr": optimizer.param_groups[0]["lr"],
+                },
+                step=epoch,
+            )
 
         checkpoint_path = args.output_dir / f"epoch_{epoch:03d}.pth"
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-                "args": vars(args),
-            },
-            checkpoint_path,
-        )
+        torch.save(build_checkpoint_state(epoch), checkpoint_path)
 
         if val_metrics["psnr"] > best_psnr:
             best_psnr = val_metrics["psnr"]
             best_path = args.output_dir / "best.pth"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state": model.state_dict(),
-                    "optimizer_state": optimizer.state_dict(),
-                    "scheduler_state": scheduler.state_dict(),
-                    "args": vars(args),
-                },
-                best_path,
-            )
+            torch.save(build_checkpoint_state(epoch), best_path)
             print(f"Saved best model to {best_path}")
+            if wandb_run:
+                wandb_run.summary["best_psnr"] = best_psnr
+                wandb_run.summary["best_epoch"] = epoch
 
     if writer:
         writer.close()
+    if wandb_run:
+        wandb_run.finish()
 
 
 def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.device, scale: float) -> Dict[str, float]:
@@ -216,8 +247,11 @@ def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.d
             loss = criterion(pred, batch["hr_ms"])
             losses.append(loss.item())
 
-            psnr_scores.append(psnr(pred, batch["hr_ms"]).mean().item())
-            sam_scores.append(sam(pred, batch["hr_ms"]).mean().item())
+            pred_rescaled = pred * scale
+            target_rescaled = batch["hr_ms"] * scale
+
+            psnr_scores.append(psnr(pred_rescaled, target_rescaled, data_range=scale))
+            sam_scores.append(sam(pred_rescaled, target_rescaled))
 
     return {
         "loss": float(sum(losses) / len(losses)),
