@@ -30,9 +30,9 @@ from otpnet.prefetch import CUDAPrefetcher
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train OTPNet for pansharpening.")
-    parser.add_argument("--train-file", type=Path, default=Path("dataset/train_wv3.h5"))
-    parser.add_argument("--valid-file", type=Path, default=Path("dataset/valid_wv3.h5"))
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--train-file", type=Path, default=Path("dataset/WV3/train_wv3.h5"))
+    parser.add_argument("--valid-file", type=Path, default=Path("dataset/WV3/valid_wv3.h5"))
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -216,18 +216,7 @@ def main() -> None:
             optimizer.step()
 
             running_loss += loss.item()
-
-            if iteration % args.log_interval == 0:
-                lr = optimizer.param_groups[0]["lr"]
-                avg_loss = running_loss / args.log_interval
-                print(f"Epoch {epoch:03d} Iter {iteration:05d} | Loss {avg_loss:.4f} | LR {lr:.2e}")
-                global_step = (epoch - 1) * len(train_loader) + iteration
-                if writer:
-                    writer.add_scalar("train/loss", avg_loss, global_step)
-                if wandb_run:
-                    wandb_run.log({"train/loss": avg_loss, "train/lr": lr}, step=global_step)
-                running_loss = 0.0
-
+            
         scheduler.step()
 
         should_checkpoint = args.checkpoint_every > 0 and epoch % args.checkpoint_every == 0
