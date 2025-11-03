@@ -72,10 +72,11 @@ def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.d
     psnr_scores = []
     sam_scores = []
     l1 = torch.nn.L1Loss()
+    non_blocking = device.type == "cuda"
 
     with torch.no_grad():
         for batch in loader:
-            batch = {k: v.to(device) / scale for k, v in batch.items()}
+            batch = {k: v.to(device, non_blocking=non_blocking) / scale for k, v in batch.items()}
             pred = model(batch["pan"], batch["lr_ms"])
             loss = l1(pred, batch["hr_ms"])
             losses.append(loss.item())
@@ -100,6 +101,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     sample = loader.dataset[0]

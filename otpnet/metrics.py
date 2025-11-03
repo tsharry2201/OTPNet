@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import numpy as np
 import torch
-
-
-def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
-    return tensor.detach().cpu().numpy().astype(np.float64)
 
 
 def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -20,33 +15,38 @@ def l2_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 def psnr(pred: torch.Tensor, target: torch.Tensor, data_range: float = 1.0) -> float:
     """Peak signal-to-noise ratio using the same formulation as evaluate_results.py."""
-    pred_np = _to_numpy(pred)
-    target_np = _to_numpy(target)
-    mse = np.mean((pred_np - target_np) ** 2)
-    if mse <= 1e-10:
+    pred_detached = pred.detach()
+    target_detached = target.detach()
+
+    mse = torch.mean((pred_detached - target_detached) ** 2)
+    if mse.item() <= 1e-10:
         return float("inf")
-    eps = np.finfo(np.float64).eps
-    return float(20.0 * np.log10(data_range / (np.sqrt(mse) + eps)))
+
+    dtype = pred_detached.dtype if pred_detached.is_floating_point() else torch.float32
+    eps = torch.finfo(dtype).eps
+    data_range_tensor = torch.as_tensor(data_range, dtype=dtype, device=pred_detached.device)
+    psnr_value = 20.0 * torch.log10(data_range_tensor / (torch.sqrt(mse) + eps))
+    return float(psnr_value.detach().cpu())
 
 
 def sam(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> float:
     """Spectral angle mapper matching evaluate_results.py (averaged across pixels)."""
-    pred_np = _to_numpy(pred)
-    target_np = _to_numpy(target)
+    pred_detached = pred.detach()
+    target_detached = target.detach()
 
-    b, c, h, w = pred_np.shape
-    pred_pixels = np.transpose(pred_np, (0, 2, 3, 1)).reshape(-1, c)
-    target_pixels = np.transpose(target_np, (0, 2, 3, 1)).reshape(-1, c)
+    b, c, h, w = pred_detached.shape
+    pred_pixels = pred_detached.permute(0, 2, 3, 1).reshape(b * h * w, c)
+    target_pixels = target_detached.permute(0, 2, 3, 1).reshape(b * h * w, c)
 
-    inner_product = np.sum(pred_pixels * target_pixels, axis=1)
-    pred_norm = np.sqrt(np.sum(pred_pixels ** 2, axis=1))
-    target_norm = np.sqrt(np.sum(target_pixels ** 2, axis=1))
+    inner_product = torch.sum(pred_pixels * target_pixels, dim=1)
+    pred_norm = torch.norm(pred_pixels, dim=1)
+    target_norm = torch.norm(target_pixels, dim=1)
 
     cos_theta = inner_product / (pred_norm * target_norm + eps)
-    cos_theta = np.clip(cos_theta, 0.0, 1.0)
+    cos_theta = torch.clamp(cos_theta, 0.0, 1.0)
 
-    angles = np.arccos(cos_theta)
-    return float(np.mean(angles))
+    angles = torch.acos(cos_theta)
+    return float(torch.mean(angles).detach().cpu())
 
 
 __all__ = ["l1_loss", "l2_loss", "psnr", "sam"]

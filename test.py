@@ -43,7 +43,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device, scale: float) -> Dict[str, torch.Tensor]:
-    return {k: v.to(device) / scale for k, v in batch.items()}
+    non_blocking = device.type == "cuda"
+    return {k: v.to(device, non_blocking=non_blocking) / scale for k, v in batch.items()}
 
 
 def main() -> None:
@@ -55,6 +56,7 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     if len(loader.dataset) == 0:

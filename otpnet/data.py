@@ -68,7 +68,7 @@ def create_dataloader(
     batch_size: int,
     shuffle: bool,
     num_workers: int = 0,
-    pin_memory: bool = True,
+    pin_memory: bool = False,
 ) -> DataLoader:
     """Helper to instantiate a DataLoader for an H5 dataset."""
     dataset = WV3H5Dataset(file_path)

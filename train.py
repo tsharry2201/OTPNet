@@ -75,9 +75,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device, scale: float) -> Dict[str, torch.Tensor]:
+    non_blocking = device.type == "cuda"
     scaled = {}
     for key, tensor in batch.items():
-        scaled[key] = tensor.to(device) / scale
+        scaled[key] = tensor.to(device, non_blocking=non_blocking) / scale
     return scaled
 
 
@@ -98,18 +99,21 @@ def main() -> None:
         args.num_workers = 0
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
+    pin_memory = device.type == "cuda"
 
     train_loader = create_dataloader(
         args.train_file,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )
     valid_loader = create_dataloader(
         args.valid_file,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )
 
     model = OTPNet(
