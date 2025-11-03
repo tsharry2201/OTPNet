@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import math
+from datetime import datetime
 import platform
 from pathlib import Path
 from typing import Dict, Optional, Any, Iterable
@@ -49,10 +50,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--no-tensorboard", action="store_true")
     parser.add_argument(
-        "--checkpoint-interval",
+        "--checkpoint-every",
         type=int,
-        default=0,
-        help="Save a training checkpoint every N iterations (0 to disable).",
+        default=20,
+        help="Save a checkpoint and run validation every N epochs (0 to disable during training).",
     )
     parser.add_argument(
         "--prefetch-to-gpu",
@@ -158,7 +159,15 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = args.output_dir
+    timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    run_dir = base_dir / timestamp
+    suffix = 1
+    while run_dir.exists():
+        run_dir = base_dir / f"{timestamp}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir = run_dir
     writer = None
     if not args.no_tensorboard and SummaryWriter is not None:
         writer = SummaryWriter(log_dir=args.output_dir / "logs")
@@ -219,50 +228,50 @@ def main() -> None:
                     wandb_run.log({"train/loss": avg_loss, "train/lr": lr}, step=global_step)
                 running_loss = 0.0
 
-            if args.checkpoint_interval and iteration % args.checkpoint_interval == 0:
-                iter_path = args.output_dir / f"epoch_{epoch:03d}_iter_{iteration:05d}.pth"
-                torch.save(build_checkpoint_state(epoch, iteration), iter_path)
-
         scheduler.step()
 
-        val_metrics = evaluate(
-            model,
-            valid_loader,
-            device,
-            args.scale,
-            use_prefetch=use_gpu_prefetch,
-        )
-        print(
-            f"[Epoch {epoch:03d}] val_loss={val_metrics['loss']:.4f} "
-            f"psnr={val_metrics['psnr']:.2f}dB sam={val_metrics['sam']:.4f}"
-        )
+        should_checkpoint = args.checkpoint_every > 0 and epoch % args.checkpoint_every == 0
+        is_final_epoch = epoch == args.epochs
 
-        if writer:
-            writer.add_scalar("valid/loss", val_metrics["loss"], epoch)
-            writer.add_scalar("valid/psnr", val_metrics["psnr"], epoch)
-            writer.add_scalar("valid/sam", val_metrics["sam"], epoch)
-        if wandb_run:
-            wandb_run.log(
-                {
-                    "valid/loss": val_metrics["loss"],
-                    "valid/psnr": val_metrics["psnr"],
-                    "valid/sam": val_metrics["sam"],
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                },
-                step=epoch,
+        if should_checkpoint or is_final_epoch:
+            val_metrics = evaluate(
+                model,
+                valid_loader,
+                device,
+                args.scale,
+                use_prefetch=use_gpu_prefetch,
+            )
+            print(
+                f"[Epoch {epoch:03d}] val_loss={val_metrics['loss']:.4f} "
+                f"psnr={val_metrics['psnr']:.2f}dB sam={val_metrics['sam']:.4f}"
             )
 
-        checkpoint_path = args.output_dir / f"epoch_{epoch:03d}.pth"
-        torch.save(build_checkpoint_state(epoch), checkpoint_path)
-
-        if val_metrics["psnr"] > best_psnr:
-            best_psnr = val_metrics["psnr"]
-            best_path = args.output_dir / "best.pth"
-            torch.save(build_checkpoint_state(epoch), best_path)
-            print(f"Saved best model to {best_path}")
+            if writer:
+                writer.add_scalar("valid/loss", val_metrics["loss"], epoch)
+                writer.add_scalar("valid/psnr", val_metrics["psnr"], epoch)
+                writer.add_scalar("valid/sam", val_metrics["sam"], epoch)
             if wandb_run:
-                wandb_run.summary["best_psnr"] = best_psnr
-                wandb_run.summary["best_epoch"] = epoch
+                wandb_run.log(
+                    {
+                        "valid/loss": val_metrics["loss"],
+                        "valid/psnr": val_metrics["psnr"],
+                        "valid/sam": val_metrics["sam"],
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                    },
+                    step=epoch,
+                )
+
+            checkpoint_path = args.output_dir / f"epoch_{epoch:03d}.pth"
+            torch.save(build_checkpoint_state(epoch), checkpoint_path)
+
+            if val_metrics["psnr"] > best_psnr:
+                best_psnr = val_metrics["psnr"]
+                best_path = args.output_dir / "best.pth"
+                torch.save(build_checkpoint_state(epoch), best_path)
+                print(f"Saved best model to {best_path}")
+                if wandb_run:
+                    wandb_run.summary["best_psnr"] = best_psnr
+                    wandb_run.summary["best_epoch"] = epoch
 
     if writer:
         writer.close()

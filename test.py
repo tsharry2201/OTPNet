@@ -10,21 +10,12 @@ from typing import List
 import numpy as np
 import scipy.io as sio
 import torch
-from torch.serialization import add_safe_globals
 
 from otpnet import OTPNet
 from otpnet.batch_utils import prepare_batch
 from otpnet.data import create_dataloader
 from otpnet.metrics import psnr, sam
 from evaluate import build_model  # reuse checkpoint loading helper
-
-try:
-    from pathlib import WindowsPath
-except ImportError:  # pragma: no cover
-    WindowsPath = None
-
-if WindowsPath is not None:
-    add_safe_globals({WindowsPath})
 
 
 def parse_args() -> argparse.Namespace:
