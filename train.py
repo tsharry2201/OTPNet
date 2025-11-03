@@ -6,7 +6,7 @@ import argparse
 import math
 import platform
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Iterable
 
 import torch
 from torch import nn
@@ -21,8 +21,10 @@ except ImportError:  # pragma: no cover - optional dependency
     wandb = None  # type: ignore[assignment]
 
 from otpnet import OTPNet
+from otpnet.batch_utils import prepare_batch
 from otpnet.data import create_dataloader
 from otpnet.metrics import psnr, sam
+from otpnet.prefetch import CUDAPrefetcher
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,8 +51,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=10,
+        default=0,
         help="Save a training checkpoint every N iterations (0 to disable).",
+    )
+    parser.add_argument(
+        "--prefetch-to-gpu",
+        dest="prefetch_to_gpu",
+        action="store_true",
+        help="Force asynchronous GPU prefetching of mini-batches.",
+    )
+    parser.add_argument(
+        "--no-prefetch-to-gpu",
+        dest="prefetch_to_gpu",
+        action="store_false",
+        help="Disable asynchronous GPU prefetching even when CUDA is available.",
+    )
+    parser.set_defaults(prefetch_to_gpu=None)
+    parser.add_argument(
+        "--disable-pin-memory",
+        action="store_true",
+        help="Disable DataLoader pin_memory (useful when CPU load is a bottleneck).",
     )
     parser.add_argument("--wandb", action="store_true", help="Enable logging to Weights & Biases.")
     parser.add_argument(
@@ -74,14 +94,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device, scale: float) -> Dict[str, torch.Tensor]:
-    non_blocking = device.type == "cuda"
-    scaled = {}
-    for key, tensor in batch.items():
-        scaled[key] = tensor.to(device, non_blocking=non_blocking) / scale
-    return scaled
-
-
 def serialize_args(args: argparse.Namespace) -> Dict[str, Any]:
     serialised: Dict[str, Any] = {}
     for key, value in vars(args).items():
@@ -92,6 +104,18 @@ def serialize_args(args: argparse.Namespace) -> Dict[str, Any]:
     return serialised
 
 
+def make_batch_iterator(
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    scale: float,
+    use_prefetch: bool,
+) -> Iterable[Dict[str, torch.Tensor]]:
+    """Yield batches on the target device, optionally using an async CUDA prefetcher."""
+    if use_prefetch and device.type == "cuda":
+        return CUDAPrefetcher(loader, device, scale)
+    return (prepare_batch(batch, device, scale) for batch in loader)
+
+
 def main() -> None:
     args = parse_args()
     if platform.system() == "Windows" and args.num_workers > 0:
@@ -99,7 +123,11 @@ def main() -> None:
         args.num_workers = 0
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu")
-    pin_memory = device.type == "cuda"
+    pin_memory = device.type == "cuda" and not args.disable_pin_memory
+    if args.prefetch_to_gpu is None:
+        use_gpu_prefetch = device.type == "cuda"
+    else:
+        use_gpu_prefetch = bool(args.prefetch_to_gpu) and device.type == "cuda"
 
     train_loader = create_dataloader(
         args.train_file,
@@ -169,8 +197,7 @@ def main() -> None:
         model.train()
         running_loss = 0.0
 
-        for iteration, batch in enumerate(train_loader, start=1):
-            batch = prepare_batch(batch, device, args.scale)
+        for iteration, batch in enumerate(make_batch_iterator(train_loader, device, args.scale, use_gpu_prefetch), start=1):
 
             pred = model(batch["pan"], batch["lr_ms"])
             loss = criterion(pred, batch["hr_ms"])
@@ -198,7 +225,13 @@ def main() -> None:
 
         scheduler.step()
 
-        val_metrics = evaluate(model, valid_loader, device, args.scale)
+        val_metrics = evaluate(
+            model,
+            valid_loader,
+            device,
+            args.scale,
+            use_prefetch=use_gpu_prefetch,
+        )
         print(
             f"[Epoch {epoch:03d}] val_loss={val_metrics['loss']:.4f} "
             f"psnr={val_metrics['psnr']:.2f}dB sam={val_metrics['sam']:.4f}"
@@ -237,7 +270,14 @@ def main() -> None:
         wandb_run.finish()
 
 
-def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.device, scale: float) -> Dict[str, float]:
+def evaluate(
+    model: OTPNet,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    scale: float,
+    *,
+    use_prefetch: bool = False,
+) -> Dict[str, float]:
     criterion = nn.L1Loss()
     model.eval()
     losses = []
@@ -245,8 +285,8 @@ def evaluate(model: OTPNet, loader: torch.utils.data.DataLoader, device: torch.d
     sam_scores = []
 
     with torch.no_grad():
-        for batch in loader:
-            batch = prepare_batch(batch, device, scale)
+        batch_iterable = make_batch_iterator(loader, device, scale, use_prefetch)
+        for batch in batch_iterable:
             pred = model(batch["pan"], batch["lr_ms"])
             loss = criterion(pred, batch["hr_ms"])
             losses.append(loss.item())

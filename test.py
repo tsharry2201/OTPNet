@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import scipy.io as sio
@@ -13,6 +13,7 @@ import torch
 from torch.serialization import add_safe_globals
 
 from otpnet import OTPNet
+from otpnet.batch_utils import prepare_batch
 from otpnet.data import create_dataloader
 from otpnet.metrics import psnr, sam
 from evaluate import build_model  # reuse checkpoint loading helper
@@ -40,11 +41,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-channels", type=int, default=None, help="Override checkpoint hidden channels.")
     parser.add_argument("--proximal-layers", type=int, default=None, help="Override checkpoint proximal depth.")
     return parser.parse_args()
-
-
-def prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device, scale: float) -> Dict[str, torch.Tensor]:
-    non_blocking = device.type == "cuda"
-    return {k: v.to(device, non_blocking=non_blocking) / scale for k, v in batch.items()}
 
 
 def main() -> None:
